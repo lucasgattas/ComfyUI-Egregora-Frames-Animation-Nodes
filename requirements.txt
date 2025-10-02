@@ -1,0 +1,12 @@
+torch>=2.0.0
+numpy>=1.24.0
+Pillow>=10.0.0
+opencv-python>=4.8.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9
+requests>=2.31.0
+
+# Optional AI interpolation models
+# Uncomment to enable RIFE/FILM support
+# torch-rife
+# film-net
