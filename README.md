@@ -38,12 +38,12 @@ cd ComfyUI/custom_nodes/
 
 2. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/egregora-animation-nodes.git
+git clone https://github.com/lucasgattas/ComfyUI-Egregora-Frames-Animation-Nodes.git
 ```
 
 3. Install dependencies:
 ```bash
-cd egregora-animation-nodes
+cd ComfyUI-Egregora-Frames-Animation-Nodes
 pip install -r requirements.txt
 ```
 
@@ -52,7 +52,7 @@ pip install -r requirements.txt
 ### Method 3: Automatic Installation
 
 ```bash
-cd ComfyUI/custom_nodes/egregora-animation-nodes
+cd ComfyUI/custom_nodes/ComfyUI-Egregora-Frames-Animation-Nodes
 python install.py
 ```
 
@@ -284,11 +284,6 @@ MIT License - See LICENSE file for details
 - OpenCV project
 - RIFE authors
 - Google FILM team
-
-## 📞 Support
-
-- GitHub Issues: [Report bugs or request features](https://github.com/yourusername/egregora-animation-nodes/issues)
-- Discord: [Join ComfyUI Discord](https://discord.gg/comfyui)
 
 ## 🔄 Changelog
 
