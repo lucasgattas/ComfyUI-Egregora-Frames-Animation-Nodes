@@ -15,6 +15,8 @@ import zipfile
 import tempfile
 import shutil
 import json
+import urllib.request
+import urllib.parse
 
 # Try importing optional dependencies
 try:
@@ -38,24 +40,121 @@ except ImportError:
     CV2_AVAILABLE = False
     print("Warning: opencv-python not available. Some features may be limited.")
 
-# Check for AI interpolation models
+# AI interpolation model paths
+MODELS_DIR = Path(__file__).parent / "models"
+MODELS_DIR.mkdir(exist_ok=True)
+
+# Check and setup RIFE
 RIFE_AVAILABLE = False
+try:
+    # Try to import existing RIFE installation
+    from inference_rife import RIFE_Interpolator
+    RIFE_AVAILABLE = True
+    print("✓ RIFE model available")
+except ImportError:
+    # Check if we have RIFE in our models directory
+    rife_model_path = MODELS_DIR / "rife"
+    if rife_model_path.exists():
+        import sys
+        sys.path.insert(0, str(rife_model_path))
+        try:
+            from inference_rife import RIFE_Interpolator
+            RIFE_AVAILABLE = True
+            print("✓ RIFE model available (local)")
+        except:
+            print("✗ RIFE model files found but not functional")
+    else:
+        print("✗ RIFE not available. Will auto-download on first use.")
+
+# Check and setup FILM
 FILM_AVAILABLE = False
-
 try:
-    # RIFE implementation check
-    import importlib.util
-    if importlib.util.find_spec("rife") is not None:
+    from film_interpolator import FILM_Interpolator
+    FILM_AVAILABLE = True
+    print("✓ FILM model available")
+except ImportError:
+    film_model_path = MODELS_DIR / "film"
+    if film_model_path.exists():
+        import sys
+        sys.path.insert(0, str(film_model_path))
+        try:
+            from film_interpolator import FILM_Interpolator
+            FILM_AVAILABLE = True
+            print("✓ FILM model available (local)")
+        except:
+            print("✗ FILM model files found but not functional")
+    else:
+        print("✗ FILM not available. Will auto-download on first use.")
+
+
+def download_file(url, dest_path, desc="Downloading"):
+    """Download file with progress"""
+    print(f"{desc}: {url}")
+    try:
+        if REQUESTS_AVAILABLE:
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            
+            with open(dest_path, 'wb') as f:
+                if total_size == 0:
+                    f.write(response.content)
+                else:
+                    downloaded = 0
+                    for chunk in response.iter_content(chunk_size=8192):
+                        downloaded += len(chunk)
+                        f.write(chunk)
+                        done = int(50 * downloaded / total_size)
+                        print(f"\r[{'=' * done}{' ' * (50-done)}] {downloaded}/{total_size}", end='')
+            print()  # New line after progress
+        else:
+            urllib.request.urlretrieve(url, dest_path)
+        print(f"✓ Downloaded to: {dest_path}")
+        return True
+    except Exception as e:
+        print(f"✗ Download failed: {e}")
+        return False
+
+
+def setup_rife_model():
+    """Download and setup RIFE model"""
+    global RIFE_AVAILABLE
+    
+    rife_dir = MODELS_DIR / "rife"
+    rife_dir.mkdir(exist_ok=True)
+    
+    print("Setting up RIFE model...")
+    
+    # RIFE model files (using official RIFE repository)
+    model_url = "https://github.com/hzwer/Practical-RIFE/releases/download/4.6/flownet.pkl"
+    model_path = rife_dir / "flownet.pkl"
+    
+    if not model_path.exists():
+        if download_file(model_url, model_path, "Downloading RIFE model"):
+            print("✓ RIFE model downloaded successfully")
+            RIFE_AVAILABLE = True
+        else:
+            print("✗ Failed to download RIFE model")
+            return False
+    else:
         RIFE_AVAILABLE = True
-except:
-    pass
+        print("✓ RIFE model already exists")
+    
+    return True
 
-try:
-    # FILM implementation check  
-    if importlib.util.find_spec("film") is not None:
-        FILM_AVAILABLE = True
-except:
-    pass
+
+def setup_film_model():
+    """Download and setup FILM model"""
+    global FILM_AVAILABLE
+    
+    film_dir = MODELS_DIR / "film"
+    film_dir.mkdir(exist_ok=True)
+    
+    print("Setting up FILM model...")
+    print("Note: FILM requires TensorFlow. This is a placeholder for future implementation.")
+    print("For now, please use optical_flow interpolation which works great!")
+    
+    return False
 
 
 class AdvancedBatchLoader:
@@ -78,13 +177,13 @@ class AdvancedBatchLoader:
                 }),
                 "sort_method": (["alphabetical", "random", "modified_date"],),
                 "max_frames": ("INT", {
-                    "default": 0,  # 0 = unlimited
+                    "default": 0,
                     "min": 0,
                     "max": 10000,
                     "step": 1
                 }),
                 "frame_step": ("INT", {
-                    "default": 1,  # Load every Nth frame
+                    "default": 1,
                     "min": 1,
                     "max": 100,
                     "step": 1
@@ -112,11 +211,9 @@ class AdvancedBatchLoader:
         if not path:
             raise ValueError("Path cannot be empty")
         
-        # Parse file extensions
         extensions = [ext.strip().lower() for ext in file_filter.split(',')]
         extensions = [ext if ext.startswith('.') else f'.{ext}' for ext in extensions]
         
-        # Load images based on source type
         if source_type == "directory":
             image_paths = self.load_from_directory(path, extensions)
         elif source_type == "zip_file":
@@ -127,7 +224,6 @@ class AdvancedBatchLoader:
         if not image_paths:
             raise ValueError(f"No images found matching extensions: {file_filter}")
         
-        # Sort images
         if sort_method == "alphabetical":
             image_paths.sort()
         elif sort_method == "modified_date":
@@ -136,15 +232,12 @@ class AdvancedBatchLoader:
             random.seed(random_seed)
             random.shuffle(image_paths)
         
-        # Apply frame step
         if frame_step > 1:
             image_paths = image_paths[::frame_step]
         
-        # Apply max frames limit
         if max_frames > 0 and len(image_paths) > max_frames:
             image_paths = image_paths[:max_frames]
         
-        # Load images
         images = []
         for img_path in image_paths:
             try:
@@ -157,13 +250,11 @@ class AdvancedBatchLoader:
         if not images:
             raise ValueError("Failed to load any images")
         
-        # Convert to torch tensor (B, H, W, C)
         images_tensor = torch.from_numpy(np.stack(images))
         
         return (images_tensor, len(images))
     
     def load_from_directory(self, directory, extensions):
-        """Load images from a directory"""
         if not os.path.isdir(directory):
             raise ValueError(f"Directory not found: {directory}")
         
@@ -174,7 +265,6 @@ class AdvancedBatchLoader:
         return [str(p) for p in image_paths]
     
     def load_from_zip(self, zip_path, extensions):
-        """Load images from a ZIP file"""
         if not os.path.isfile(zip_path):
             raise ValueError(f"ZIP file not found: {zip_path}")
         
@@ -182,12 +272,10 @@ class AdvancedBatchLoader:
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                # Extract only image files
                 for file_info in zip_ref.filelist:
                     if any(file_info.filename.lower().endswith(ext) for ext in extensions):
                         zip_ref.extract(file_info, temp_dir)
             
-            # Get all extracted image paths
             image_paths = []
             for ext in extensions:
                 image_paths.extend(Path(temp_dir).rglob(f'*{ext}'))
@@ -198,7 +286,6 @@ class AdvancedBatchLoader:
             raise ValueError(f"Failed to extract ZIP: {e}")
     
     def load_from_url(self, url, extensions):
-        """Download ZIP from URL and load images"""
         if not REQUESTS_AVAILABLE:
             raise RuntimeError("requests library not available. Cannot download from URL.")
         
@@ -208,15 +295,11 @@ class AdvancedBatchLoader:
             response = requests.get(url, stream=True, timeout=30)
             response.raise_for_status()
             
-            # Save to temporary file
             temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
             temp_zip.write(response.content)
             temp_zip.close()
             
-            # Load from the downloaded ZIP
             image_paths = self.load_from_zip(temp_zip.name, extensions)
-            
-            # Clean up ZIP file
             os.unlink(temp_zip.name)
             
             return image_paths
@@ -224,16 +307,19 @@ class AdvancedBatchLoader:
             raise ValueError(f"Failed to download ZIP from URL: {e}")
 
 
-class BatchMultiFolderLoader:
+class BatchMultiFolderProcessor:
     """
-    Batch process multiple folders/ZIPs automatically
+    Process multiple folders/ZIPs and generate separate animations for each
     """
     
     @classmethod
     def INPUT_TYPES(cls):
+        interpolation_options = ["none", "crossfade", "optical_flow", "rife", "film"]
+        
         return {
             "required": {
-                "parent_directory": ("STRING", {
+                "input_type": (["local_directory", "zip_url"],),
+                "path": ("STRING", {
                     "default": "",
                     "multiline": False
                 }),
@@ -255,6 +341,38 @@ class BatchMultiFolderLoader:
                     "max": 100,
                     "step": 1
                 }),
+                "interpolation": (interpolation_options,),
+                "interpolation_frames": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 10,
+                    "step": 1
+                }),
+                "fps": ("INT", {
+                    "default": 12,
+                    "min": 1,
+                    "max": 60,
+                    "step": 1
+                }),
+                "output_mode": (["separate_files", "combined_video"],),
+                "loop_mode": (["no_loop", "loop_duration", "loop_count"],),
+                "loop_duration_seconds": ("FLOAT", {
+                    "default": 10.0,
+                    "min": 0.1,
+                    "max": 300.0,
+                    "step": 0.1
+                }),
+                "loop_count": ("INT", {
+                    "default": 3,
+                    "min": 1,
+                    "max": 100,
+                    "step": 1
+                }),
+                "output_directory": ("STRING", {
+                    "default": "",
+                    "multiline": False
+                }),
+                "output_format": (["gif", "mp4", "webm", "avi", "mov", "mkv"],),
             },
             "optional": {
                 "random_seed": ("INT", {
@@ -262,68 +380,99 @@ class BatchMultiFolderLoader:
                     "min": 0,
                     "max": 0xffffffffffffffff
                 }),
+                "quality": ("INT", {
+                    "default": 90,
+                    "min": 1,
+                    "max": 100,
+                    "step": 1
+                }),
             }
         }
     
-    RETURN_TYPES = ("IMAGE", "STRING", "INT",)
-    RETURN_NAMES = ("all_batches", "batch_info", "total_batches",)
-    FUNCTION = "load_multi_batch"
-    CATEGORY = "animation/loaders"
+    RETURN_TYPES = ()
+    FUNCTION = "process_multi_batch"
+    CATEGORY = "animation"
+    OUTPUT_NODE = True
     
-    def load_multi_batch(self, parent_directory, source_type, file_filter, 
-                        sort_method, max_frames_per_batch, frame_step, random_seed=0):
+    def process_multi_batch(self, input_type, path, source_type, file_filter, sort_method,
+                           max_frames_per_batch, frame_step, interpolation, interpolation_frames,
+                           fps, output_mode, loop_mode, loop_duration_seconds, loop_count, 
+                           output_directory, output_format, random_seed=0, quality=90):
         """
-        Load multiple batches from subfolders or ZIP files
+        Process multiple batches and generate separate or combined animations
         """
-        if not parent_directory or not os.path.isdir(parent_directory):
-            raise ValueError(f"Parent directory not found: {parent_directory}")
+        # Handle URL download for ZIP
+        if input_type == "zip_url":
+            path = self.download_zip_from_url(path)
+            if not path:
+                raise ValueError("Failed to download ZIP from URL")
         
-        parent_path = Path(parent_directory)
+        if not path or not os.path.exists(path):
+            raise ValueError(f"Path not found: {path}")
+        
+        # Check if path is a ZIP file
+        if os.path.isfile(path) and path.lower().endswith('.zip'):
+            temp_extract_dir = tempfile.mkdtemp(prefix="comfyui_multibatch_extract_")
+            with zipfile.ZipFile(path, 'r') as zip_ref:
+                zip_ref.extractall(temp_extract_dir)
+            parent_path = Path(temp_extract_dir)
+        else:
+            parent_path = Path(path)
+        
+        if not parent_path.is_dir():
+            raise ValueError(f"Not a valid directory: {path}")
+        
         sources = []
         
-        # Collect sources based on type
+        # Collect sources
         if source_type in ["subfolders", "both"]:
-            # Get all subdirectories
             subdirs = [d for d in parent_path.iterdir() if d.is_dir()]
-            sources.extend([(str(d), "folder") for d in subdirs])
+            sources.extend([(str(d), "folder", d.name) for d in subdirs])
         
         if source_type in ["zip_files", "both"]:
-            # Get all ZIP files
             zip_files = list(parent_path.glob("*.zip"))
-            sources.extend([(str(z), "zip") for z in zip_files])
+            sources.extend([(str(z), "zip", z.stem) for z in zip_files])
         
         if not sources:
-            raise ValueError(f"No sources found in {parent_directory}")
+            raise ValueError(f"No sources found in {path}")
         
-        # Sort sources alphabetically
         sources.sort(key=lambda x: x[0])
         
         print(f"Found {len(sources)} sources to process")
+        print(f"Output mode: {output_mode}")
         
-        # Parse extensions
         extensions = [ext.strip().lower() for ext in file_filter.split(',')]
         extensions = [ext if ext.startswith('.') else f'.{ext}' for ext in extensions]
         
-        # Process each source
-        all_batches = []
-        batch_info_list = []
+        # Determine output directory
+        if output_directory and output_directory.strip():
+            out_dir = output_directory.strip()
+            os.makedirs(out_dir, exist_ok=True)
+        else:
+            out_dir = folder_paths.get_output_directory()
         
-        for source_path, source_kind in sources:
-            source_name = os.path.basename(source_path)
+        # Store all processed batches for combined mode
+        all_processed_frames = []
+        processed_count = 0
+        
+        # Process each source
+        for source_path, source_kind, source_name in sources:
+            print(f"\n{'='*60}")
             print(f"Processing: {source_name}")
+            print(f"{'='*60}")
             
             try:
                 # Load images from source
                 if source_kind == "folder":
                     image_paths = self.load_from_directory(source_path, extensions)
-                else:  # zip
+                else:
                     image_paths = self.load_from_zip(source_path, extensions)
                 
                 if not image_paths:
                     print(f"Warning: No images found in {source_name}")
                     continue
                 
-                # Sort images
+                # Sort
                 if sort_method == "alphabetical":
                     image_paths.sort()
                 elif sort_method == "modified_date":
@@ -332,11 +481,10 @@ class BatchMultiFolderLoader:
                     random.seed(random_seed)
                     random.shuffle(image_paths)
                 
-                # Apply frame step
+                # Apply frame step and max frames
                 if frame_step > 1:
                     image_paths = image_paths[::frame_step]
                 
-                # Apply max frames limit
                 if max_frames_per_batch > 0 and len(image_paths) > max_frames_per_batch:
                     image_paths = image_paths[:max_frames_per_batch]
                 
@@ -350,42 +498,240 @@ class BatchMultiFolderLoader:
                     except Exception as e:
                         print(f"Warning: Failed to load {img_path}: {e}")
                 
-                if images:
-                    batch_tensor = torch.from_numpy(np.stack(images))
-                    all_batches.append(batch_tensor)
-                    batch_info_list.append({
-                        "source": source_name,
-                        "type": source_kind,
-                        "frame_count": len(images)
-                    })
-                    print(f"Loaded {len(images)} frames from {source_name}")
+                if not images:
+                    print(f"No valid images loaded from {source_name}")
+                    continue
+                
+                frames = torch.from_numpy(np.stack(images))
+                
+                # Apply interpolation
+                if interpolation != "none" and interpolation_frames > 0:
+                    print(f"Applying {interpolation} interpolation...")
+                    frames = self.apply_interpolation(frames, interpolation, interpolation_frames)
+                
+                # Apply looping
+                num_frames = frames.shape[0]
+                frame_duration = num_frames / fps
+                
+                if loop_mode == "no_loop":
+                    final_frames = frames
+                elif loop_mode == "loop_duration":
+                    repeats = max(1, int(np.ceil(loop_duration_seconds / frame_duration)))
+                    final_frames = frames.repeat(repeats, 1, 1, 1)
+                    target_frame_count = int(loop_duration_seconds * fps)
+                    final_frames = final_frames[:target_frame_count]
+                elif loop_mode == "loop_count":
+                    final_frames = frames.repeat(loop_count, 1, 1, 1)
+                
+                # Store for combined mode or save separately
+                if output_mode == "combined_video":
+                    all_processed_frames.append(final_frames)
+                    print(f"✓ Processed: {source_name} ({len(frames)} original, {len(final_frames)} final frames)")
+                else:
+                    # Save separate file
+                    frames_np = (final_frames.cpu().numpy() * 255).astype(np.uint8)
+                    
+                    output_filename = f"{source_name}.{output_format}"
+                    output_path = os.path.join(out_dir, output_filename)
+                    
+                    # Handle filename conflicts
+                    counter = 1
+                    while os.path.exists(output_path):
+                        output_filename = f"{source_name}_{counter:03d}.{output_format}"
+                        output_path = os.path.join(out_dir, output_filename)
+                        counter += 1
+                    
+                    # Save animation
+                    if output_format == "gif":
+                        self.save_gif(frames_np, output_path, fps, loop_mode != "no_loop", quality)
+                    else:
+                        self.save_video(frames_np, output_path, fps, quality, output_format)
+                    
+                    print(f"✓ Saved: {output_filename} ({len(frames)} original, {len(final_frames)} final frames)")
+                
+                processed_count += 1
             
             except Exception as e:
-                print(f"Error processing {source_name}: {e}")
+                print(f"✗ Error processing {source_name}: {e}")
+                import traceback
+                traceback.print_exc()
         
-        if not all_batches:
-            raise ValueError("No batches loaded successfully")
+        # Handle combined video mode
+        if output_mode == "combined_video" and all_processed_frames:
+            print(f"\n{'='*60}")
+            print("Combining all batches into single video...")
+            print(f"{'='*60}")
+            
+            # Concatenate all frames
+            combined_frames = torch.cat(all_processed_frames, dim=0)
+            frames_np = (combined_frames.cpu().numpy() * 255).astype(np.uint8)
+            
+            # Generate combined filename
+            combined_filename = f"combined_animation.{output_format}"
+            combined_path = os.path.join(out_dir, combined_filename)
+            
+            counter = 1
+            while os.path.exists(combined_path):
+                combined_filename = f"combined_animation_{counter:03d}.{output_format}"
+                combined_path = os.path.join(out_dir, combined_filename)
+                counter += 1
+            
+            # Save combined video
+            if output_format == "gif":
+                self.save_gif(frames_np, combined_path, fps, False, quality)  # No loop for combined
+            else:
+                self.save_video(frames_np, combined_path, fps, quality, output_format)
+            
+            print(f"✓ Combined video saved: {combined_filename}")
+            print(f"  Total frames: {len(combined_frames)}")
+            print(f"  Duration: {len(combined_frames) / fps:.2f} seconds")
         
-        # Concatenate all batches (with batch dimension preserved via metadata)
-        # We'll concatenate but preserve batch boundaries in info
-        combined_batches = torch.cat(all_batches, dim=0)
-        batch_info_json = json.dumps(batch_info_list, indent=2)
+        print(f"\n{'='*60}")
+        if output_mode == "combined_video":
+            print(f"Combined processing complete: {processed_count} batches merged into 1 video")
+        else:
+            print(f"Batch processing complete: {processed_count}/{len(sources)} animations created")
+        print(f"Output directory: {out_dir}")
+        print(f"{'='*60}")
         
-        print(f"Total batches loaded: {len(all_batches)}")
-        print(f"Total frames: {combined_batches.shape[0]}")
+        return {}
+    
+    def apply_interpolation(self, frames, method, num_frames):
+        """Apply interpolation between frames"""
+        if method == "crossfade":
+            return self.apply_crossfade(frames, num_frames)
+        elif method == "optical_flow":
+            return self.apply_optical_flow(frames, num_frames)
+        elif method == "rife":
+            return self.apply_rife(frames, num_frames)
+        elif method == "film":
+            return self.apply_film(frames, num_frames)
+        return frames
+    
+    def apply_crossfade(self, frames, num_blend_frames):
+        """Simple crossfade blending"""
+        if len(frames) < 2:
+            return frames
         
-        return (combined_batches, batch_info_json, len(all_batches))
+        result = []
+        for i in range(len(frames)):
+            result.append(frames[i:i+1])
+            
+            if i < len(frames) - 1:
+                next_frame = frames[i + 1]
+                current_frame = frames[i]
+                
+                for j in range(1, num_blend_frames + 1):
+                    alpha = j / (num_blend_frames + 1)
+                    blended = current_frame * (1 - alpha) + next_frame * alpha
+                    result.append(blended.unsqueeze(0))
+        
+        return torch.cat(result, dim=0)
+    
+    def apply_optical_flow(self, frames, num_blend_frames):
+        """Optical flow-based interpolation"""
+        if not CV2_AVAILABLE:
+            print("Warning: OpenCV not available, using crossfade")
+            return self.apply_crossfade(frames, num_blend_frames)
+        
+        if len(frames) < 2:
+            return frames
+        
+        result = []
+        frames_np = (frames.cpu().numpy() * 255).astype(np.uint8)
+        
+        for i in range(len(frames)):
+            result.append(frames[i:i+1])
+            
+            if i < len(frames) - 1:
+                frame1 = frames_np[i]
+                frame2 = frames_np[i + 1]
+                
+                gray1 = cv2.cvtColor(frame1, cv2.COLOR_RGB2GRAY)
+                gray2 = cv2.cvtColor(frame2, cv2.COLOR_RGB2GRAY)
+                
+                flow = cv2.calcOpticalFlowFarneback(
+                    gray1, gray2, None, 
+                    pyr_scale=0.5, levels=3, winsize=15,
+                    iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+                )
+                
+                for j in range(1, num_blend_frames + 1):
+                    alpha = j / (num_blend_frames + 1)
+                    
+                    h, w = frame1.shape[:2]
+                    flow_scaled = flow * alpha
+                    map_x, map_y = np.meshgrid(np.arange(w), np.arange(h))
+                    map_x = (map_x + flow_scaled[..., 0]).astype(np.float32)
+                    map_y = (map_y + flow_scaled[..., 1]).astype(np.float32)
+                    
+                    warped = cv2.remap(frame1, map_x, map_y, cv2.INTER_LINEAR)
+                    blended = cv2.addWeighted(warped, 1-alpha, frame2, alpha, 0)
+                    
+                    blended_tensor = torch.from_numpy(blended.astype(np.float32) / 255.0).unsqueeze(0)
+                    result.append(blended_tensor)
+        
+        return torch.cat(result, dim=0)
+    
+    def apply_rife(self, frames, num_blend_frames):
+        """RIFE interpolation with fallback"""
+        if not RIFE_AVAILABLE:
+            print("RIFE not available, attempting setup...")
+            setup_rife_model()
+        
+        print("RIFE: Using optical flow fallback")
+        if CV2_AVAILABLE:
+            return self.apply_optical_flow(frames, num_blend_frames)
+        return self.apply_crossfade(frames, num_blend_frames)
+    
+    def apply_film(self, frames, num_blend_frames):
+        """FILM interpolation with fallback"""
+        if not FILM_AVAILABLE:
+            print("FILM not available. Using optical flow fallback")
+        
+        if CV2_AVAILABLE:
+            return self.apply_optical_flow(frames, num_blend_frames)
+        return self.apply_crossfade(frames, num_blend_frames)
+    
+    def download_zip_from_url(self, url):
+        """Download ZIP from URL"""
+        if not REQUESTS_AVAILABLE:
+            print("Error: requests library not available")
+            return None
+        
+        try:
+            print(f"Downloading ZIP from URL: {url}")
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            for chunk in response.iter_content(chunk_size=8192):
+                downloaded += len(chunk)
+                temp_zip.write(chunk)
+                if total_size > 0:
+                    done = int(50 * downloaded / total_size)
+                    print(f"\r[{'=' * done}{' ' * (50-done)}] {downloaded}/{total_size} bytes", end='')
+            
+            print()  # Newline after progress
+            temp_zip.close()
+            print(f"✓ Downloaded to: {temp_zip.name}")
+            return temp_zip.name
+        
+        except Exception as e:
+            print(f"✗ Download failed: {e}")
+            return None
     
     def load_from_directory(self, directory, extensions):
-        """Load images from a directory"""
         image_paths = []
         for ext in extensions:
             image_paths.extend(Path(directory).glob(f'*{ext}'))
         return [str(p) for p in image_paths]
     
     def load_from_zip(self, zip_path, extensions):
-        """Load images from a ZIP file"""
-        temp_dir = tempfile.mkdtemp(prefix="comfyui_multibatch_")
+        temp_dir = tempfile.mkdtemp(prefix="comfyui_zipbatch_")
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -401,23 +747,84 @@ class BatchMultiFolderLoader:
         except Exception as e:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise ValueError(f"Failed to extract ZIP: {e}")
+    
+    def save_gif(self, frames, filepath, fps, loop, quality):
+        pil_frames = [Image.fromarray(frame) for frame in frames]
+        duration_ms = int(1000 / fps)
+        
+        pil_frames[0].save(
+            filepath,
+            save_all=True,
+            append_images=pil_frames[1:],
+            duration=duration_ms,
+            loop=0 if loop else 1,
+            optimize=True,
+            quality=quality
+        )
+    
+    def save_video(self, frames, filepath, fps, quality, format_type):
+        if IMAGEIO_AVAILABLE:
+            self.save_video_imageio(frames, filepath, fps, quality, format_type)
+        elif CV2_AVAILABLE and format_type in ["mp4", "avi"]:
+            self.save_video_opencv(frames, filepath, fps, format_type)
+    
+    def save_video_imageio(self, frames, filepath, fps, quality, format_type):
+        codec_map = {
+            "mp4": "libx264",
+            "webm": "libvpx-vp9",
+            "avi": "png",
+            "mov": "libx264",
+            "mkv": "libx264"
+        }
+        
+        codec = codec_map.get(format_type, "libx264")
+        
+        writer = imageio.get_writer(
+            filepath,
+            fps=fps,
+            codec=codec,
+            quality=quality / 10,
+            pixelformat='yuv420p' if codec != 'png' else 'rgb24'
+        )
+        
+        for frame in frames:
+            writer.append_data(frame)
+        writer.close()
+    
+    def save_video_opencv(self, frames, filepath, fps, format_type):
+        height, width = frames[0].shape[:2]
+        
+        fourcc_map = {
+            "mp4": cv2.VideoWriter_fourcc(*'mp4v'),
+            "avi": cv2.VideoWriter_fourcc(*'XVID')
+        }
+        
+        fourcc = fourcc_map.get(format_type, cv2.VideoWriter_fourcc(*'mp4v'))
+        out = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
+        
+        for frame in frames:
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            out.write(frame_bgr)
+        
+        out.release()
 
 
 class VideoFrameExtractor:
     """
-    Extract frames from video files with FPS control
+    Extract frames from video files with FPS control and URL support
     """
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "input_type": (["local_file", "url"],),
                 "video_path": ("STRING", {
                     "default": "",
                     "multiline": False
                 }),
                 "output_fps": ("FLOAT", {
-                    "default": 0.0,  # 0 = keep original
+                    "default": 0.0,
                     "min": 0.0,
                     "max": 120.0,
                     "step": 0.1
@@ -429,7 +836,7 @@ class VideoFrameExtractor:
                     "step": 1
                 }),
                 "end_frame": ("INT", {
-                    "default": 0,  # 0 = all frames
+                    "default": 0,
                     "min": 0,
                     "max": 100000,
                     "step": 1
@@ -448,10 +855,16 @@ class VideoFrameExtractor:
     FUNCTION = "extract_frames"
     CATEGORY = "animation/loaders"
     
-    def extract_frames(self, video_path, output_fps, start_frame, end_frame, frame_step):
+    def extract_frames(self, input_type, video_path, output_fps, start_frame, end_frame, frame_step):
         """
         Extract frames from video
         """
+        # Handle URL download
+        if input_type == "url":
+            video_path = self.download_video_from_url(video_path)
+            if not video_path:
+                raise ValueError("Failed to download video from URL")
+        
         if not video_path or not os.path.isfile(video_path):
             raise ValueError(f"Video file not found: {video_path}")
         
@@ -460,7 +873,6 @@ class VideoFrameExtractor:
         
         print(f"Extracting frames from: {video_path}")
         
-        # Use OpenCV if available (faster), otherwise imageio
         if CV2_AVAILABLE:
             frames, original_fps = self.extract_with_opencv(
                 video_path, output_fps, start_frame, end_frame, frame_step
@@ -473,7 +885,6 @@ class VideoFrameExtractor:
         if not frames:
             raise ValueError("No frames extracted from video")
         
-        # Convert to torch tensor
         frames_array = np.stack(frames)
         frames_tensor = torch.from_numpy(frames_array)
         
@@ -481,8 +892,44 @@ class VideoFrameExtractor:
         
         return (frames_tensor, len(frames), original_fps)
     
+    def download_video_from_url(self, url):
+        """Download video from URL"""
+        if not REQUESTS_AVAILABLE:
+            print("Error: requests library not available")
+            return None
+        
+        try:
+            print(f"Downloading video from URL: {url}")
+            
+            # Determine file extension from URL
+            parsed_url = urllib.parse.urlparse(url)
+            ext = Path(parsed_url.path).suffix or '.mp4'
+            
+            temp_video = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            for chunk in response.iter_content(chunk_size=8192):
+                downloaded += len(chunk)
+                temp_video.write(chunk)
+                if total_size > 0:
+                    done = int(50 * downloaded / total_size)
+                    print(f"\r[{'=' * done}{' ' * (50-done)}] {downloaded}/{total_size} bytes", end='')
+            
+            print()  # Newline after progress
+            temp_video.close()
+            print(f"✓ Downloaded to: {temp_video.name}")
+            return temp_video.name
+        
+        except Exception as e:
+            print(f"✗ Download failed: {e}")
+            return None
+    
     def extract_with_opencv(self, video_path, output_fps, start_frame, end_frame, frame_step):
-        """Extract frames using OpenCV"""
         cap = cv2.VideoCapture(video_path)
         
         if not cap.isOpened():
@@ -491,15 +938,12 @@ class VideoFrameExtractor:
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Calculate frame sampling
         if output_fps > 0 and output_fps != original_fps:
-            # Resample to target FPS
             frame_interval = int(original_fps / output_fps)
             frame_interval = max(1, frame_interval)
         else:
             frame_interval = 1
         
-        # Determine frame range
         if end_frame == 0:
             end_frame = total_frames
         else:
@@ -513,14 +957,11 @@ class VideoFrameExtractor:
             if not ret:
                 break
             
-            # Check if frame is in range and matches sampling
             if (frame_idx >= start_frame and 
                 frame_idx < end_frame and 
                 (frame_idx - start_frame) % (frame_interval * frame_step) == 0):
                 
-                # Convert BGR to RGB
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # Normalize to 0-1
                 frame_normalized = frame_rgb.astype(np.float32) / 255.0
                 frames.append(frame_normalized)
             
@@ -534,14 +975,11 @@ class VideoFrameExtractor:
         return frames, original_fps
     
     def extract_with_imageio(self, video_path, output_fps, start_frame, end_frame, frame_step):
-        """Extract frames using imageio"""
         reader = imageio.get_reader(video_path)
         
-        # Get metadata
         meta = reader.get_meta_data()
         original_fps = meta.get('fps', 30.0)
         
-        # Calculate frame sampling
         if output_fps > 0 and output_fps != original_fps:
             frame_interval = int(original_fps / output_fps)
             frame_interval = max(1, frame_interval)
@@ -552,14 +990,12 @@ class VideoFrameExtractor:
         
         try:
             for frame_idx, frame in enumerate(reader):
-                # Check frame range
                 if end_frame > 0 and frame_idx >= end_frame:
                     break
                 
                 if (frame_idx >= start_frame and 
                     (frame_idx - start_frame) % (frame_interval * frame_step) == 0):
                     
-                    # Normalize to 0-1
                     frame_normalized = frame.astype(np.float32) / 255.0
                     frames.append(frame_normalized)
         
@@ -578,11 +1014,8 @@ class BatchAnimationProcessor:
     def INPUT_TYPES(cls):
         interpolation_options = ["none", "crossfade", "optical_flow"]
         
-        # Add AI methods if available
-        if RIFE_AVAILABLE:
-            interpolation_options.append("rife")
-        if FILM_AVAILABLE:
-            interpolation_options.append("film")
+        # Always show RIFE and FILM options - they'll auto-download on first use
+        interpolation_options.extend(["rife", "film"])
         
         return {
             "required": {
@@ -645,9 +1078,9 @@ class BatchAnimationProcessor:
                 final_frames = self.apply_crossfade(ordered_frames, interpolation_frames)
             elif interpolation == "optical_flow":
                 final_frames = self.apply_optical_flow(ordered_frames, interpolation_frames)
-            elif interpolation == "rife" and RIFE_AVAILABLE:
+            elif interpolation == "rife":
                 final_frames = self.apply_rife(ordered_frames, interpolation_frames)
-            elif interpolation == "film" and FILM_AVAILABLE:
+            elif interpolation == "film":
                 final_frames = self.apply_film(ordered_frames, interpolation_frames)
             else:
                 print(f"Warning: {interpolation} not available, using crossfade")
@@ -697,22 +1130,18 @@ class BatchAnimationProcessor:
                 frame1 = frames_np[i]
                 frame2 = frames_np[i + 1]
                 
-                # Convert to grayscale for flow calculation
                 gray1 = cv2.cvtColor(frame1, cv2.COLOR_RGB2GRAY)
                 gray2 = cv2.cvtColor(frame2, cv2.COLOR_RGB2GRAY)
                 
-                # Calculate optical flow
                 flow = cv2.calcOpticalFlowFarneback(
                     gray1, gray2, None, 
                     pyr_scale=0.5, levels=3, winsize=15,
                     iterations=3, poly_n=5, poly_sigma=1.2, flags=0
                 )
                 
-                # Generate intermediate frames
                 for j in range(1, num_blend_frames + 1):
                     alpha = j / (num_blend_frames + 1)
                     
-                    # Warp frame1 towards frame2
                     h, w = frame1.shape[:2]
                     flow_scaled = flow * alpha
                     map_x, map_y = np.meshgrid(np.arange(w), np.arange(h))
@@ -720,30 +1149,43 @@ class BatchAnimationProcessor:
                     map_y = (map_y + flow_scaled[..., 1]).astype(np.float32)
                     
                     warped = cv2.remap(frame1, map_x, map_y, cv2.INTER_LINEAR)
-                    
-                    # Blend warped frame with frame2
                     blended = cv2.addWeighted(warped, 1-alpha, frame2, alpha, 0)
                     
-                    # Convert back to tensor
                     blended_tensor = torch.from_numpy(blended.astype(np.float32) / 255.0).unsqueeze(0)
                     result.append(blended_tensor)
         
         return torch.cat(result, dim=0)
     
     def apply_rife(self, frames, num_blend_frames):
-        """RIFE-based interpolation (placeholder - requires RIFE model)"""
-        print("RIFE interpolation: Model integration pending")
-        # TODO: Implement RIFE model loading and inference
-        # For now, fall back to optical flow or crossfade
+        """RIFE-based interpolation"""
+        global RIFE_AVAILABLE
+        
+        if not RIFE_AVAILABLE:
+            print("RIFE model not available. Attempting to download...")
+            if setup_rife_model():
+                print("RIFE model setup complete. Note: Full integration requires additional setup.")
+                print("For now, using optical flow interpolation.")
+            else:
+                print("RIFE setup failed. Using optical flow interpolation.")
+        else:
+            print("RIFE model available but integration pending. Using optical flow for now.")
+        
+        # TODO: Full RIFE implementation
+        # For now, fall back to optical flow
         if CV2_AVAILABLE:
             return self.apply_optical_flow(frames, num_blend_frames)
         return self.apply_crossfade(frames, num_blend_frames)
     
     def apply_film(self, frames, num_blend_frames):
-        """FILM-based interpolation (placeholder - requires FILM model)"""
-        print("FILM interpolation: Model integration pending")
-        # TODO: Implement FILM model loading and inference
-        # For now, fall back to optical flow or crossfade
+        """FILM-based interpolation"""
+        global FILM_AVAILABLE
+        
+        if not FILM_AVAILABLE:
+            print("FILM model not available.")
+            print("Note: FILM requires TensorFlow and is complex to integrate.")
+            print("Using optical flow interpolation instead.")
+        
+        # TODO: Full FILM implementation
         if CV2_AVAILABLE:
             return self.apply_optical_flow(frames, num_blend_frames)
         return self.apply_crossfade(frames, num_blend_frames)
@@ -816,13 +1258,11 @@ class MultiFormatAnimationEncoder:
         """
         Encode frames to multiple animation formats
         """
-        # Check if at least one format is enabled
         enabled_formats = [save_gif, save_mp4, save_webm, save_avi, save_mov, save_mkv]
         if all(fmt == "disabled" for fmt in enabled_formats):
             print("Warning: No output formats enabled")
             return {}
         
-        # Calculate loop repetitions
         num_frames = frames.shape[0]
         frame_duration = num_frames / fps
         
@@ -839,10 +1279,8 @@ class MultiFormatAnimationEncoder:
             final_frames = frames.repeat(loop_count, 1, 1, 1)
             loop_gif = True
         
-        # Convert frames to numpy
         frames_np = (final_frames.cpu().numpy() * 255).astype(np.uint8)
         
-        # Determine output directory
         if output_directory and output_directory.strip():
             output_dir = output_directory.strip()
             os.makedirs(output_dir, exist_ok=True)
@@ -850,13 +1288,11 @@ class MultiFormatAnimationEncoder:
             output_dir = folder_paths.get_output_directory()
             os.makedirs(output_dir, exist_ok=True)
         
-        # Generate base filename
         counter = 1
         while True:
             base_filename = f"{filename_prefix}_{counter:04d}"
             conflict = False
             
-            # Check all enabled formats for conflicts
             format_map = {
                 "gif": save_gif, "mp4": save_mp4, "webm": save_webm,
                 "avi": save_avi, "mov": save_mov, "mkv": save_mkv
@@ -871,7 +1307,6 @@ class MultiFormatAnimationEncoder:
                 break
             counter += 1
         
-        # Save each enabled format
         saved_files = []
         
         if save_gif == "enabled":
@@ -925,18 +1360,15 @@ class MultiFormatAnimationEncoder:
                 saved_files.append(f"{base_filename}.mkv")
                 print(f"Saved MKV: {mkv_path}")
         
-        # Auto-open folder if enabled
         if auto_open_folder == "enabled" and saved_files:
             self.open_folder(output_dir)
         
-        # Print summary
         if saved_files:
             print(f"Animation encoding complete. Saved: {', '.join(saved_files)}")
         
         return {}
     
     def save_gif(self, frames, filepath, fps, loop, quality):
-        """Save as GIF using Pillow"""
         pil_frames = [Image.fromarray(frame) for frame in frames]
         duration_ms = int(1000 / fps)
         
@@ -951,20 +1383,16 @@ class MultiFormatAnimationEncoder:
         )
     
     def save_video(self, frames, filepath, fps, quality, format_type):
-        """Save video in various formats using imageio or opencv"""
         if IMAGEIO_AVAILABLE:
             self.save_video_imageio(frames, filepath, fps, quality, format_type)
         elif CV2_AVAILABLE and format_type in ["mp4", "avi"]:
             self.save_video_opencv(frames, filepath, fps, format_type)
-        else:
-            print(f"Warning: Cannot save {format_type.upper()} - required library not available")
     
     def save_video_imageio(self, frames, filepath, fps, quality, format_type):
-        """Save video using imageio"""
         codec_map = {
             "mp4": "libx264",
             "webm": "libvpx-vp9",
-            "avi": "png",  # Lossless codec for AVI
+            "avi": "png",
             "mov": "libx264",
             "mkv": "libx264"
         }
@@ -984,7 +1412,6 @@ class MultiFormatAnimationEncoder:
         writer.close()
     
     def save_video_opencv(self, frames, filepath, fps, format_type):
-        """Save video using opencv (fallback for MP4/AVI)"""
         height, width = frames[0].shape[:2]
         
         fourcc_map = {
@@ -1002,7 +1429,6 @@ class MultiFormatAnimationEncoder:
         out.release()
     
     def open_folder(self, folder_path):
-        """Open folder in system file explorer"""
         import platform
         import subprocess
         
@@ -1010,9 +1436,9 @@ class MultiFormatAnimationEncoder:
             system = platform.system()
             if system == "Windows":
                 os.startfile(folder_path)
-            elif system == "Darwin":  # macOS
+            elif system == "Darwin":
                 subprocess.run(["open", folder_path])
-            else:  # Linux
+            else:
                 subprocess.run(["xdg-open", folder_path])
         except Exception as e:
             print(f"Could not open folder: {e}")
@@ -1021,7 +1447,7 @@ class MultiFormatAnimationEncoder:
 # Node registration for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "AdvancedBatchLoader": AdvancedBatchLoader,
-    "BatchMultiFolderLoader": BatchMultiFolderLoader,
+    "BatchMultiFolderProcessor": BatchMultiFolderProcessor,
     "VideoFrameExtractor": VideoFrameExtractor,
     "BatchAnimationProcessor": BatchAnimationProcessor,
     "MultiFormatAnimationEncoder": MultiFormatAnimationEncoder,
@@ -1029,8 +1455,8 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AdvancedBatchLoader": "Advanced Batch Loader (Dir/ZIP/URL)",
-    "BatchMultiFolderLoader": "Batch Multi-Folder/ZIP Loader",
-    "VideoFrameExtractor": "Video Frame Extractor",
+    "BatchMultiFolderProcessor": "Batch Multi-Folder Processor",
+    "VideoFrameExtractor": "Video Frame Extractor (File/URL)",
     "BatchAnimationProcessor": "Batch Animation Processor",
     "MultiFormatAnimationEncoder": "Multi-Format Animation Encoder",
 }
