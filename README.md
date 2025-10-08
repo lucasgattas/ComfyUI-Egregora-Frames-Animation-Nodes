@@ -6,9 +6,9 @@ Advanced image list animation toolkit for ComfyUI with batch processing, AI-powe
 
 ### 5 Powerful Nodes
 
-1. **Advanced Batch Loader** - Load images from directories, ZIP files, or URLs
-2. **Batch Multi-Folder/ZIP Loader** - Process multiple folders/ZIPs automatically
-3. **Video Frame Extractor** - Extract and resample frames from any video
+1. **Advanced Batch Loader (Dir/ZIP/URL)** - Load images from directories, ZIP files, or URLs
+2. **Batch Multi-Folder Processor** - Process multiple folders/ZIPs automatically
+3. **Video Frame Extractor (File/URL)** - Extract and resample frames from any video
 4. **Batch Animation Processor** - Order, interpolate, and process frame sequences
 5. **Multi-Format Animation Encoder** - Export to GIF, MP4, WebM, AVI, MOV, MKV
 
