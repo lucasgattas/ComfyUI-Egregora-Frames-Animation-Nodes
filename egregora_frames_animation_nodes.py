@@ -354,6 +354,12 @@ class BatchMultiFolderProcessor:
                     "max": 60,
                     "step": 1
                 }),
+                "final_output_fps": ("INT", {
+                    "default": 0,  # 0 = same as fps
+                    "min": 0,
+                    "max": 120,
+                    "step": 1
+                }),
                 "output_mode": (["separate_files", "combined_video"],),
                 "loop_mode": (["no_loop", "loop_duration", "loop_count"],),
                 "loop_duration_seconds": ("FLOAT", {
@@ -396,8 +402,8 @@ class BatchMultiFolderProcessor:
     
     def process_multi_batch(self, input_type, path, source_type, file_filter, sort_method,
                            max_frames_per_batch, frame_step, interpolation, interpolation_frames,
-                           fps, output_mode, loop_mode, loop_duration_seconds, loop_count, 
-                           output_directory, output_format, random_seed=0, quality=90):
+                           fps, final_output_fps, output_mode, loop_mode, loop_duration_seconds, 
+                           loop_count, output_directory, output_format, random_seed=0, quality=90):
         """
         Process multiple batches and generate separate or combined animations
         """
@@ -531,6 +537,13 @@ class BatchMultiFolderProcessor:
                     # Save separate file
                     frames_np = (final_frames.cpu().numpy() * 255).astype(np.uint8)
                     
+                    # Apply final FPS reencoding if needed
+                    if final_output_fps > 0 and final_output_fps != fps:
+                        frames_np = self.reencode_fps(frames_np, fps, final_output_fps)
+                        save_fps = final_output_fps
+                    else:
+                        save_fps = fps
+                    
                     output_filename = f"{source_name}.{output_format}"
                     output_path = os.path.join(out_dir, output_filename)
                     
@@ -543,11 +556,11 @@ class BatchMultiFolderProcessor:
                     
                     # Save animation
                     if output_format == "gif":
-                        self.save_gif(frames_np, output_path, fps, loop_mode != "no_loop", quality)
+                        self.save_gif(frames_np, output_path, save_fps, loop_mode != "no_loop", quality)
                     else:
-                        self.save_video(frames_np, output_path, fps, quality, output_format)
+                        self.save_video(frames_np, output_path, save_fps, quality, output_format)
                     
-                    print(f"✓ Saved: {output_filename} ({len(frames)} original, {len(final_frames)} final frames)")
+                    print(f"✓ Saved: {output_filename} ({len(frames)} original, {len(final_frames)} processed, {len(frames_np)} final @ {save_fps}fps)")
                 
                 processed_count += 1
             
@@ -566,6 +579,13 @@ class BatchMultiFolderProcessor:
             combined_frames = torch.cat(all_processed_frames, dim=0)
             frames_np = (combined_frames.cpu().numpy() * 255).astype(np.uint8)
             
+            # Apply final FPS reencoding if needed
+            if final_output_fps > 0 and final_output_fps != fps:
+                frames_np = self.reencode_fps(frames_np, fps, final_output_fps)
+                save_fps = final_output_fps
+            else:
+                save_fps = fps
+            
             # Generate combined filename
             combined_filename = f"combined_animation.{output_format}"
             combined_path = os.path.join(out_dir, combined_filename)
@@ -578,13 +598,13 @@ class BatchMultiFolderProcessor:
             
             # Save combined video
             if output_format == "gif":
-                self.save_gif(frames_np, combined_path, fps, False, quality)  # No loop for combined
+                self.save_gif(frames_np, combined_path, save_fps, False, quality)  # No loop for combined
             else:
-                self.save_video(frames_np, combined_path, fps, quality, output_format)
+                self.save_video(frames_np, combined_path, save_fps, quality, output_format)
             
             print(f"✓ Combined video saved: {combined_filename}")
-            print(f"  Total frames: {len(combined_frames)}")
-            print(f"  Duration: {len(combined_frames) / fps:.2f} seconds")
+            print(f"  Total frames: {len(frames_np)}")
+            print(f"  Duration: {len(frames_np) / save_fps:.2f} seconds @ {save_fps}fps")
         
         print(f"\n{'='*60}")
         if output_mode == "combined_video":
@@ -683,6 +703,35 @@ class BatchMultiFolderProcessor:
         if CV2_AVAILABLE:
             return self.apply_optical_flow(frames, num_blend_frames)
         return self.apply_crossfade(frames, num_blend_frames)
+    
+    def reencode_fps(self, frames, original_fps, target_fps):
+        """
+        Reencode frames to different FPS while maintaining playback speed
+        Duplicates frames as needed to match target FPS
+        """
+        if original_fps == target_fps:
+            return frames
+        
+        num_frames = len(frames)
+        duration = num_frames / original_fps  # Duration in seconds
+        target_frame_count = int(duration * target_fps)
+        
+        # Create frame indices for resampling
+        original_indices = np.arange(num_frames)
+        target_indices = np.linspace(0, num_frames - 1, target_frame_count)
+        
+        # Resample frames (duplicates frames as needed)
+        reencoded_frames = []
+        for idx in target_indices:
+            frame_idx = int(np.round(idx))
+            frame_idx = min(frame_idx, num_frames - 1)  # Clamp to valid range
+            reencoded_frames.append(frames[frame_idx])
+        
+        reencoded = np.array(reencoded_frames)
+        print(f"  FPS reencoding: {original_fps}fps ({num_frames} frames) → {target_fps}fps ({len(reencoded)} frames)")
+        print(f"  Duration maintained: {duration:.2f} seconds")
+        
+        return reencoded
     
     def apply_film(self, frames, num_blend_frames):
         """FILM interpolation with fallback"""
@@ -1207,6 +1256,12 @@ class MultiFormatAnimationEncoder:
                     "max": 60,
                     "step": 1
                 }),
+                "final_output_fps": ("INT", {
+                    "default": 0,  # 0 = same as fps
+                    "min": 0,
+                    "max": 120,
+                    "step": 1
+                }),
                 "loop_mode": (["no_loop", "loop_duration", "loop_count"],),
                 "loop_duration_seconds": ("FLOAT", {
                     "default": 10.0,
@@ -1250,7 +1305,7 @@ class MultiFormatAnimationEncoder:
     CATEGORY = "animation"
     OUTPUT_NODE = True
     
-    def encode_animation(self, frames, fps, loop_mode, 
+    def encode_animation(self, frames, fps, final_output_fps, loop_mode, 
                         loop_duration_seconds, loop_count, 
                         filename_prefix, output_directory, 
                         save_gif, save_mp4, save_webm, save_avi, save_mov, save_mkv,
@@ -1280,6 +1335,13 @@ class MultiFormatAnimationEncoder:
             loop_gif = True
         
         frames_np = (final_frames.cpu().numpy() * 255).astype(np.uint8)
+        
+        # Apply final FPS reencoding if needed
+        if final_output_fps > 0 and final_output_fps != fps:
+            frames_np = self.reencode_fps(frames_np, fps, final_output_fps)
+            save_fps = final_output_fps
+        else:
+            save_fps = fps
         
         if output_directory and output_directory.strip():
             output_dir = output_directory.strip()
@@ -1311,7 +1373,7 @@ class MultiFormatAnimationEncoder:
         
         if save_gif == "enabled":
             gif_path = os.path.join(output_dir, f"{base_filename}.gif")
-            self.save_gif(frames_np, gif_path, fps, loop_gif, quality)
+            self.save_gif(frames_np, gif_path, save_fps, loop_gif, quality)
             saved_files.append(f"{base_filename}.gif")
             print(f"Saved GIF: {gif_path}")
         
@@ -1320,7 +1382,7 @@ class MultiFormatAnimationEncoder:
                 print("Warning: Cannot save MP4 - neither imageio nor opencv-python is available")
             else:
                 mp4_path = os.path.join(output_dir, f"{base_filename}.mp4")
-                self.save_video(frames_np, mp4_path, fps, quality, "mp4")
+                self.save_video(frames_np, mp4_path, save_fps, quality, "mp4")
                 saved_files.append(f"{base_filename}.mp4")
                 print(f"Saved MP4: {mp4_path}")
         
@@ -1329,7 +1391,7 @@ class MultiFormatAnimationEncoder:
                 print("Warning: Cannot save WebM - imageio is not available")
             else:
                 webm_path = os.path.join(output_dir, f"{base_filename}.webm")
-                self.save_video(frames_np, webm_path, fps, quality, "webm")
+                self.save_video(frames_np, webm_path, save_fps, quality, "webm")
                 saved_files.append(f"{base_filename}.webm")
                 print(f"Saved WebM: {webm_path}")
         
@@ -1338,7 +1400,7 @@ class MultiFormatAnimationEncoder:
                 print("Warning: Cannot save AVI - neither opencv-python nor imageio is available")
             else:
                 avi_path = os.path.join(output_dir, f"{base_filename}.avi")
-                self.save_video(frames_np, avi_path, fps, quality, "avi")
+                self.save_video(frames_np, avi_path, save_fps, quality, "avi")
                 saved_files.append(f"{base_filename}.avi")
                 print(f"Saved AVI: {avi_path}")
         
@@ -1347,7 +1409,7 @@ class MultiFormatAnimationEncoder:
                 print("Warning: Cannot save MOV - imageio is not available")
             else:
                 mov_path = os.path.join(output_dir, f"{base_filename}.mov")
-                self.save_video(frames_np, mov_path, fps, quality, "mov")
+                self.save_video(frames_np, mov_path, save_fps, quality, "mov")
                 saved_files.append(f"{base_filename}.mov")
                 print(f"Saved MOV: {mov_path}")
         
@@ -1356,7 +1418,7 @@ class MultiFormatAnimationEncoder:
                 print("Warning: Cannot save MKV - imageio is not available")
             else:
                 mkv_path = os.path.join(output_dir, f"{base_filename}.mkv")
-                self.save_video(frames_np, mkv_path, fps, quality, "mkv")
+                self.save_video(frames_np, mkv_path, save_fps, quality, "mkv")
                 saved_files.append(f"{base_filename}.mkv")
                 print(f"Saved MKV: {mkv_path}")
         
