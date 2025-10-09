@@ -201,7 +201,7 @@ class AdvancedBatchLoader:
     RETURN_TYPES = ("IMAGE", "INT",)
     RETURN_NAMES = ("images", "frame_count",)
     FUNCTION = "load_batch"
-    CATEGORY = "animation/loaders"
+    CATEGORY = "Egregora/animation"
     
     def load_batch(self, source_type, path, file_filter, sort_method, 
                    max_frames, frame_step, random_seed=0):
@@ -397,7 +397,7 @@ class BatchMultiFolderProcessor:
     
     RETURN_TYPES = ()
     FUNCTION = "process_multi_batch"
-    CATEGORY = "animation"
+    CATEGORY = "Egregora/animation"
     OUTPUT_NODE = True
     
     def process_multi_batch(self, input_type, path, source_type, file_filter, sort_method,
@@ -457,9 +457,29 @@ class BatchMultiFolderProcessor:
         else:
             out_dir = folder_paths.get_output_directory()
         
+        # For combined mode, prepare video writer
+        combined_writer = None
+        combined_path = None
+        save_fps = final_output_fps if final_output_fps > 0 else fps
+        
+        if output_mode == "combined_video":
+            # Generate combined filename
+            combined_filename = f"combined_animation.{output_format}"
+            combined_path = os.path.join(out_dir, combined_filename)
+            
+            counter = 1
+            while os.path.exists(combined_path):
+                combined_filename = f"combined_animation_{counter:03d}.{output_format}"
+                combined_path = os.path.join(out_dir, combined_filename)
+                counter += 1
+            
+            print(f"\n{'='*60}")
+            print(f"Combined mode: Streaming directly to {combined_filename}")
+            print(f"{'='*60}")
+        
         # Store all processed batches for combined mode
-        all_processed_frames = []
         processed_count = 0
+        total_combined_frames = 0
         
         # Process each source
         for source_path, source_kind, source_name in sources:
@@ -531,8 +551,32 @@ class BatchMultiFolderProcessor:
                 
                 # Store for combined mode or save separately
                 if output_mode == "combined_video":
-                    all_processed_frames.append(final_frames)
-                    print(f"✓ Processed: {source_name} ({len(frames)} original, {len(final_frames)} final frames)")
+                    # Stream frames directly to video writer (memory efficient)
+                    frames_np = (final_frames.cpu().numpy() * 255).astype(np.uint8)
+                    
+                    # Apply final FPS reencoding if needed
+                    if final_output_fps > 0 and final_output_fps != fps:
+                        frames_np = self.reencode_fps(frames_np, fps, final_output_fps)
+                    
+                    # Initialize writer on first batch
+                    if combined_writer is None:
+                        if output_format == "gif":
+                            # For GIF, we need to collect all frames (no streaming possible)
+                            combined_writer = {"type": "gif", "frames": [], "fps": save_fps, "quality": quality}
+                        else:
+                            combined_writer = self.init_video_writer(combined_path, save_fps, 
+                                                                     frames_np[0].shape[:2], 
+                                                                     quality, output_format)
+                    
+                    # Write frames
+                    if output_format == "gif":
+                        combined_writer["frames"].extend([Image.fromarray(f) for f in frames_np])
+                    else:
+                        for frame in frames_np:
+                            self.write_frame_to_video(combined_writer, frame, output_format)
+                    
+                    total_combined_frames += len(frames_np)
+                    print(f"✓ Streamed: {source_name} ({len(frames)} original, {len(final_frames)} processed, {len(frames_np)} encoded @ {save_fps}fps)")
                 else:
                     # Save separate file
                     frames_np = (final_frames.cpu().numpy() * 255).astype(np.uint8)
@@ -569,42 +613,33 @@ class BatchMultiFolderProcessor:
                 import traceback
                 traceback.print_exc()
         
-        # Handle combined video mode
-        if output_mode == "combined_video" and all_processed_frames:
+        # Finalize combined video if in combined mode
+        if output_mode == "combined_video" and combined_writer is not None:
             print(f"\n{'='*60}")
-            print("Combining all batches into single video...")
-            print(f"{'='*60}")
+            print("Finalizing combined video...")
             
-            # Concatenate all frames
-            combined_frames = torch.cat(all_processed_frames, dim=0)
-            frames_np = (combined_frames.cpu().numpy() * 255).astype(np.uint8)
-            
-            # Apply final FPS reencoding if needed
-            if final_output_fps > 0 and final_output_fps != fps:
-                frames_np = self.reencode_fps(frames_np, fps, final_output_fps)
-                save_fps = final_output_fps
-            else:
-                save_fps = fps
-            
-            # Generate combined filename
-            combined_filename = f"combined_animation.{output_format}"
-            combined_path = os.path.join(out_dir, combined_filename)
-            
-            counter = 1
-            while os.path.exists(combined_path):
-                combined_filename = f"combined_animation_{counter:03d}.{output_format}"
-                combined_path = os.path.join(out_dir, combined_filename)
-                counter += 1
-            
-            # Save combined video
             if output_format == "gif":
-                self.save_gif(frames_np, combined_path, save_fps, False, quality)  # No loop for combined
+                # Save GIF
+                if combined_writer["frames"]:
+                    duration_ms = int(1000 / combined_writer["fps"])
+                    combined_writer["frames"][0].save(
+                        combined_path,
+                        save_all=True,
+                        append_images=combined_writer["frames"][1:],
+                        duration=duration_ms,
+                        loop=0,
+                        optimize=True,
+                        quality=combined_writer["quality"]
+                    )
+                    print(f"✓ Combined GIF saved: {os.path.basename(combined_path)}")
             else:
-                self.save_video(frames_np, combined_path, save_fps, quality, output_format)
+                # Close video writer
+                self.close_video_writer(combined_writer, output_format)
+                print(f"✓ Combined video saved: {os.path.basename(combined_path)}")
             
-            print(f"✓ Combined video saved: {combined_filename}")
-            print(f"  Total frames: {len(frames_np)}")
-            print(f"  Duration: {len(frames_np) / save_fps:.2f} seconds @ {save_fps}fps")
+            print(f"  Total frames: {total_combined_frames}")
+            print(f"  Duration: {total_combined_frames / save_fps:.2f} seconds @ {save_fps}fps")
+            print(f"{'='*60}")
         
         print(f"\n{'='*60}")
         if output_mode == "combined_video":
@@ -615,6 +650,83 @@ class BatchMultiFolderProcessor:
         print(f"{'='*60}")
         
         return {}
+    
+    def init_video_writer(self, filepath, fps, frame_shape, quality, format_type):
+        """Initialize video writer for streaming"""
+        height, width = frame_shape
+        
+        if IMAGEIO_AVAILABLE and format_type != "avi":
+            codec_map = {
+                "mp4": "libx264",
+                "webm": "libvpx-vp9",
+                "mov": "libx264",
+                "mkv": "libx264"
+            }
+            codec = codec_map.get(format_type, "libx264")
+            
+            writer = imageio.get_writer(
+                filepath,
+                fps=fps,
+                codec=codec,
+                quality=quality / 10,
+                pixelformat='yuv420p'
+            )
+            return {"type": "imageio", "writer": writer}
+        
+        elif CV2_AVAILABLE:
+            fourcc_map = {
+                "mp4": cv2.VideoWriter_fourcc(*'mp4v'),
+                "avi": cv2.VideoWriter_fourcc(*'XVID')
+            }
+            fourcc = fourcc_map.get(format_type, cv2.VideoWriter_fourcc(*'mp4v'))
+            writer = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
+            return {"type": "opencv", "writer": writer}
+        
+        return None
+    
+    def write_frame_to_video(self, writer_obj, frame, format_type):
+        """Write a single frame to video writer"""
+        if writer_obj["type"] == "imageio":
+            writer_obj["writer"].append_data(frame)
+        elif writer_obj["type"] == "opencv":
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            writer_obj["writer"].write(frame_bgr)
+    
+    def close_video_writer(self, writer_obj, format_type):
+        """Close video writer"""
+        if writer_obj["type"] == "imageio":
+            writer_obj["writer"].close()
+        elif writer_obj["type"] == "opencv":
+            writer_obj["writer"].release()
+    
+    def reencode_fps(self, frames, original_fps, target_fps):
+        """
+        Reencode frames to different FPS while maintaining playback speed
+        Duplicates frames as needed to match target FPS
+        """
+        if original_fps == target_fps:
+            return frames
+        
+        num_frames = len(frames)
+        duration = num_frames / original_fps  # Duration in seconds
+        target_frame_count = int(duration * target_fps)
+        
+        # Create frame indices for resampling
+        original_indices = np.arange(num_frames)
+        target_indices = np.linspace(0, num_frames - 1, target_frame_count)
+        
+        # Resample frames (duplicates frames as needed)
+        reencoded_frames = []
+        for idx in target_indices:
+            frame_idx = int(np.round(idx))
+            frame_idx = min(frame_idx, num_frames - 1)  # Clamp to valid range
+            reencoded_frames.append(frames[frame_idx])
+        
+        reencoded = np.array(reencoded_frames)
+        print(f"  FPS reencoding: {original_fps}fps ({num_frames} frames) → {target_fps}fps ({len(reencoded)} frames)")
+        print(f"  Duration maintained: {duration:.2f} seconds")
+        
+        return reencoded
     
     def apply_interpolation(self, frames, method, num_frames):
         """Apply interpolation between frames"""
@@ -902,7 +1014,7 @@ class VideoFrameExtractor:
     RETURN_TYPES = ("IMAGE", "INT", "FLOAT",)
     RETURN_NAMES = ("frames", "frame_count", "original_fps",)
     FUNCTION = "extract_frames"
-    CATEGORY = "animation/loaders"
+    CATEGORY = "Egregora/animation"
     
     def extract_frames(self, input_type, video_path, output_fps, start_frame, end_frame, frame_step):
         """
@@ -1096,7 +1208,7 @@ class BatchAnimationProcessor:
     RETURN_TYPES = ("IMAGE", "INT",)
     RETURN_NAMES = ("processed_frames", "fps",)
     FUNCTION = "process_frames"
-    CATEGORY = "animation"
+    CATEGORY = "Egregora/animation"
     
     def process_frames(self, images, frame_order, fps, interpolation, 
                       interpolation_frames, random_seed=0):
@@ -1302,7 +1414,7 @@ class MultiFormatAnimationEncoder:
     
     RETURN_TYPES = ()
     FUNCTION = "encode_animation"
-    CATEGORY = "animation"
+    CATEGORY = "Egregora/animation"
     OUTPUT_NODE = True
     
     def encode_animation(self, frames, fps, final_output_fps, loop_mode, 
@@ -1504,6 +1616,83 @@ class MultiFormatAnimationEncoder:
                 subprocess.run(["xdg-open", folder_path])
         except Exception as e:
             print(f"Could not open folder: {e}")
+    
+    def reencode_fps(self, frames, original_fps, target_fps):
+        """
+        Reencode frames to different FPS while maintaining playback speed
+        Duplicates frames as needed to match target FPS
+        """
+        if original_fps == target_fps:
+            return frames
+        
+        num_frames = len(frames)
+        duration = num_frames / original_fps  # Duration in seconds
+        target_frame_count = int(duration * target_fps)
+        
+        # Create frame indices for resampling
+        original_indices = np.arange(num_frames)
+        target_indices = np.linspace(0, num_frames - 1, target_frame_count)
+        
+        # Resample frames (duplicates frames as needed)
+        reencoded_frames = []
+        for idx in target_indices:
+            frame_idx = int(np.round(idx))
+            frame_idx = min(frame_idx, num_frames - 1)  # Clamp to valid range
+            reencoded_frames.append(frames[frame_idx])
+        
+        reencoded = np.array(reencoded_frames)
+        print(f"FPS reencoding: {original_fps}fps ({num_frames} frames) → {target_fps}fps ({len(reencoded)} frames)")
+        print(f"Duration maintained: {duration:.2f} seconds")
+        
+        return reencoded
+    
+    def init_video_writer(self, filepath, fps, frame_shape, quality, format_type):
+        """Initialize video writer for streaming"""
+        height, width = frame_shape
+        
+        if IMAGEIO_AVAILABLE and format_type != "avi":
+            codec_map = {
+                "mp4": "libx264",
+                "webm": "libvpx-vp9",
+                "mov": "libx264",
+                "mkv": "libx264"
+            }
+            codec = codec_map.get(format_type, "libx264")
+            
+            writer = imageio.get_writer(
+                filepath,
+                fps=fps,
+                codec=codec,
+                quality=quality / 10,
+                pixelformat='yuv420p'
+            )
+            return {"type": "imageio", "writer": writer}
+        
+        elif CV2_AVAILABLE:
+            fourcc_map = {
+                "mp4": cv2.VideoWriter_fourcc(*'mp4v'),
+                "avi": cv2.VideoWriter_fourcc(*'XVID')
+            }
+            fourcc = fourcc_map.get(format_type, cv2.VideoWriter_fourcc(*'mp4v'))
+            writer = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
+            return {"type": "opencv", "writer": writer}
+        
+        return None
+    
+    def write_frame_to_video(self, writer_obj, frame, format_type):
+        """Write a single frame to video writer"""
+        if writer_obj["type"] == "imageio":
+            writer_obj["writer"].append_data(frame)
+        elif writer_obj["type"] == "opencv":
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            writer_obj["writer"].write(frame_bgr)
+    
+    def close_video_writer(self, writer_obj, format_type):
+        """Close video writer"""
+        if writer_obj["type"] == "imageio":
+            writer_obj["writer"].close()
+        elif writer_obj["type"] == "opencv":
+            writer_obj["writer"].release()
 
 
 # Node registration for ComfyUI
