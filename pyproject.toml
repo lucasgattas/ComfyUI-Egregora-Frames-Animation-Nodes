@@ -29,7 +29,7 @@ Documentation = "https://github.com/lucasgattas/ComfyUI-Egregora-Frames-Animatio
 "Bug Tracker" = "https://github.com/lucasgattas/ComfyUI-Egregora-Frames-Animation-Nodes/issues"
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "mrgattax"
 DisplayName = "ComfyUI-Egregora-Frames-Animation-Nodes"
 Icon = ""
 includes = [] 
